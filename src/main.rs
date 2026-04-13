@@ -1,7 +1,9 @@
 mod args;
 mod config;
+mod manager;
+use crate::manager::ProcessManager;
 use clap::Parser;
-use config::Config;
+use config::{process_config, Config};
 use std::fs;
 use std::process::exit;
 use toml;
@@ -22,8 +24,11 @@ async fn main() {
                     println!("Failed to parse config: {:?}", e);
                     exit(1)
                 }
-                Ok(cfg) => {
-                    println!("{:?}", cfg);
+                Ok(raw_cfg) => {
+                    let cfg = process_config(raw_cfg);
+                    let mut manager = ProcessManager::new(4096);
+                    manager.init_process(cfg).await;
+                    manager.run().await;
                 }
             }
         }
