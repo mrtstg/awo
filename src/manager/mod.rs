@@ -20,6 +20,7 @@ pub struct ProcessManager {
     sender: Sender<ManagerEvent>,
     receiver: Receiver<ManagerEvent>,
     padding_width: usize,
+    padding_enabled: bool,
 }
 
 impl ProcessManager {
@@ -29,6 +30,7 @@ impl ProcessManager {
             sender,
             receiver,
             padding_width: 0,
+            padding_enabled: true,
         }
     }
 
@@ -38,6 +40,7 @@ impl ProcessManager {
                 .await
         }
         self.padding_width = config.run.values().map(|v| v.name.len()).max().unwrap_or(0);
+        self.padding_enabled = config.align;
     }
 
     pub async fn send(&mut self, payload: ManagerEvent) {
@@ -145,6 +148,10 @@ impl ProcessManager {
     }
 
     fn print_log(&self, name: &str, msg: String) {
-        println!("{:<width$} | {}", name, msg, width = self.padding_width);
+        if self.padding_enabled {
+            println!("{:<width$} | {}", name, msg, width = self.padding_width);
+        } else {
+            println!("{} | {}", name, msg);
+        }
     }
 }
