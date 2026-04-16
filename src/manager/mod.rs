@@ -1,8 +1,16 @@
 mod process;
-use std::time::Duration;
-
+mod time;
 use crate::config::{Config, Process, ProcessBehavior};
+use crate::manager::process::get_modified_timestamp;
+use glob::glob;
 use process::build_process_from_config;
+use std::result::Result;
+use std::time::SystemTime;
+use std::{
+    hash::{DefaultHasher, Hasher},
+    time::Duration,
+};
+use time::wait_min_delay;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, BufReader},
     sync::mpsc::{channel, Receiver, Sender},
@@ -90,11 +98,35 @@ impl ProcessManager {
                 }
 
                 tokio::spawn(async move {
-                    if let Ok(status) = child.wait().await {
-                        let code = status.code().unwrap_or(0);
-                        let _ = sender
-                            .send(ManagerEvent::ProcessExited(code, process_cfg))
-                            .await;
+                    let mut prev_hash: u64 = 0;
+                    loop {
+                        if process_cfg.watch.len() > 0 {
+                            let start = SystemTime::now();
+                            let mut hasher = DefaultHasher::new();
+                            for pattern in &process_cfg.watch {
+                                for path in glob(pattern).unwrap().filter_map(Result::ok) {
+                                    hasher.write(&get_modified_timestamp(&path).to_ne_bytes());
+                                }
+                            }
+                            let new_hash = hasher.finish();
+                            if prev_hash != 0 {
+                                if new_hash != prev_hash {
+                                    println!("Hash mismatch {}:{}", prev_hash, new_hash);
+                                }
+                            }
+                            prev_hash = new_hash;
+                            let _ = wait_min_delay(start, Duration::from_millis(500)).await;
+                        }
+
+                        if let Ok(wait) = child.try_wait() {
+                            if let Some(status) = wait {
+                                let code = status.code().unwrap_or(0);
+                                let _ = sender
+                                    .send(ManagerEvent::ProcessExited(code, process_cfg.clone()))
+                                    .await;
+                                break;
+                            }
+                        }
                     }
                 });
             }

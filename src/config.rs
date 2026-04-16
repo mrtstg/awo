@@ -40,6 +40,10 @@ fn default_restart_delay() -> u64 {
     return 1;
 }
 
+fn default_watch() -> Vec<String> {
+    return Vec::new();
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct Process {
     pub command: String,
@@ -51,6 +55,8 @@ pub struct Process {
     pub on_error: ProcessBehavior,
     #[serde(default = "default_restart_delay")]
     pub restart_delay: u64,
+    #[serde(default = "default_watch")]
+    pub watch: Vec<String>,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
