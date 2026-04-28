@@ -28,7 +28,8 @@ pub fn build_process_from_config(data: Process) -> Result<Child, String> {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .arg("-c")
-        .arg(data.command);
+        .arg(data.command)
+        .process_group(0);
     match cmd.spawn() {
         Ok(child) => Ok(child),
         Err(err) => return Err(err.to_string()),
