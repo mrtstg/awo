@@ -3,6 +3,7 @@ mod time;
 use crate::config::{Config, Process, ProcessBehavior};
 use crate::manager::process::get_modified_timestamp;
 use glob::glob;
+use libc;
 use process::build_process_from_config;
 use std::result::Result;
 use std::time::SystemTime;
@@ -11,6 +12,7 @@ use std::{
     time::Duration,
 };
 use time::wait_min_delay;
+use tokio::process::Child;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, BufReader},
     sync::mpsc::{channel, Receiver, Sender},
@@ -18,6 +20,7 @@ use tokio::{
 
 pub enum ManagerEvent {
     CreateProcess(Process),
+    RestartProcess(Process, Child),
     ProcessExited(i32, Process),
     ProcessStdout(String, Process),
     ProcessStderr(String, Process),
@@ -62,9 +65,24 @@ impl ProcessManager {
                 ManagerEvent::ProcessExited(code, p) => self.handle_exit(code, p).await,
                 ManagerEvent::ProcessStdout(msg, p) => self.print_log(&p.name, msg),
                 ManagerEvent::ProcessStderr(msg, p) => self.print_log(&p.name, msg),
+                ManagerEvent::RestartProcess(p, child) => self.handle_restart(p, child).await,
                 ManagerEvent::StopRunning => break,
             }
         }
+    }
+
+    async fn handle_restart(&mut self, process_cfg: Process, mut child: Child) {
+        self.print_log(&process_cfg.name, "Killing process...".to_string());
+        let start = SystemTime::now();
+        unsafe {
+            if let Some(pid_u32) = child.id() {
+                let pid = pid_u32.try_into().unwrap();
+                libc::killpg(pid, libc::SIGTERM);
+            }
+        }
+        let _ = child.wait().await;
+        let _ = wait_min_delay(start, Duration::from_secs(process_cfg.restart_delay)).await;
+        self.send(ManagerEvent::CreateProcess(process_cfg)).await;
     }
 
     async fn handle_create(&self, process_cfg: Process) {
@@ -111,7 +129,10 @@ impl ProcessManager {
                             let new_hash = hasher.finish();
                             if prev_hash != 0 {
                                 if new_hash != prev_hash {
-                                    println!("Hash mismatch {}:{}", prev_hash, new_hash);
+                                    let _ = sender
+                                        .send(ManagerEvent::RestartProcess(process_cfg, child))
+                                        .await;
+                                    break;
                                 }
                             }
                             prev_hash = new_hash;
@@ -142,13 +163,18 @@ impl ProcessManager {
     ) {
         tokio::spawn(async move {
             let mut lines = BufReader::new(reader).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let event = if is_stdout {
-                    ManagerEvent::ProcessStdout(line, process.clone())
-                } else {
-                    ManagerEvent::ProcessStderr(line, process.clone())
-                };
-                let _ = sender.send(event).await;
+            while let Ok(resp) = lines.next_line().await {
+                match resp {
+                    None => break,
+                    Some(line) => {
+                        let event = if is_stdout {
+                            ManagerEvent::ProcessStdout(line, process.clone())
+                        } else {
+                            ManagerEvent::ProcessStderr(line, process.clone())
+                        };
+                        let _ = sender.send(event).await;
+                    }
+                }
             }
         });
     }
