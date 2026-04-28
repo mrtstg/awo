@@ -6,6 +6,7 @@ use clap::Parser;
 use config::{process_config, Config};
 use std::fs;
 use std::process::exit;
+use tokio;
 use toml;
 
 #[tokio::main]
@@ -27,8 +28,16 @@ async fn main() {
                 Ok(raw_cfg) => {
                     let cfg = process_config(raw_cfg);
                     let mut manager = ProcessManager::new(4096);
-                    manager.init_process(&cfg).await;
-                    manager.run().await;
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {
+                            println!("Ctrl+C received, shutting down.");
+                            manager.send(manager::ManagerEvent::StopRunning).await;
+                        }
+                        _ = async {
+                            manager.init_process(&cfg).await;
+                            manager.run().await;
+                        } => {}
+                    }
                 }
             }
         }
