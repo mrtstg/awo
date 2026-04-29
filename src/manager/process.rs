@@ -4,10 +4,11 @@ use std::{
     process::Stdio,
     time::{Duration, SystemTime},
 };
+use tokio::fs;
 use tokio::process::*;
 
-pub fn get_modified_timestamp(path: &PathBuf) -> u64 {
-    match path.metadata() {
+pub async fn get_modified_timestamp(path: &PathBuf) -> u64 {
+    match fs::metadata(path).await {
         Err(_) => return 0,
         Ok(m) => match m.modified() {
             Err(_) => return 0,
@@ -29,7 +30,10 @@ pub fn build_process_from_config(data: Process) -> Result<Child, String> {
         .kill_on_drop(true)
         .arg("-c")
         .arg(data.command)
-        .process_group(0);
+        .process_group(0)
+        .env("FORCE_COLOR", "1")
+        .env("CLICOLOR_FORCE", "1")
+        .env("COLORTERM", "truecolor");
     match cmd.spawn() {
         Ok(child) => Ok(child),
         Err(err) => return Err(err.to_string()),
