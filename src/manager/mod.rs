@@ -5,6 +5,7 @@ use crate::manager::process::get_modified_timestamp;
 use glob::glob;
 use libc;
 use process::build_process_from_config;
+use std::collections::HashMap;
 use std::result::Result;
 use std::time::SystemTime;
 use std::{
@@ -17,6 +18,7 @@ use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, BufReader},
     sync::mpsc::{channel, Receiver, Sender},
 };
+use tokio_util::sync::CancellationToken;
 
 pub enum ManagerEvent {
     CreateProcess(Process),
@@ -24,6 +26,8 @@ pub enum ManagerEvent {
     ProcessExited(i32, Process),
     ProcessStdout(String, Process),
     ProcessStderr(String, Process),
+    ProcessKilled(String),
+    ProcessCreated(String, u32),
     StopRunning,
 }
 
@@ -32,6 +36,9 @@ pub struct ProcessManager {
     receiver: Receiver<ManagerEvent>,
     padding_width: usize,
     padding_enabled: bool,
+    cancel_token: CancellationToken,
+    pid_map: HashMap<String, u32>,
+    exit_on_empty: bool,
 }
 
 impl ProcessManager {
@@ -42,6 +49,9 @@ impl ProcessManager {
             receiver,
             padding_width: 0,
             padding_enabled: true,
+            cancel_token: CancellationToken::new(),
+            pid_map: HashMap::new(),
+            exit_on_empty: false,
         }
     }
 
@@ -62,11 +72,33 @@ impl ProcessManager {
         while let Some(event) = self.receiver.recv().await {
             match event {
                 ManagerEvent::CreateProcess(p) => self.handle_create(p).await,
-                ManagerEvent::ProcessExited(code, p) => self.handle_exit(code, p).await,
+                ManagerEvent::ProcessExited(code, p) => {
+                    self.pid_map.remove(&p.name);
+                    self.handle_exit(code, p).await;
+                }
                 ManagerEvent::ProcessStdout(msg, p) => self.print_log(&p.name, msg),
                 ManagerEvent::ProcessStderr(msg, p) => self.print_log(&p.name, msg),
                 ManagerEvent::RestartProcess(p, child) => self.handle_restart(p, child).await,
-                ManagerEvent::StopRunning => break,
+                ManagerEvent::StopRunning => {
+                    println!("Awaiting process stop");
+                    self.cancel_token.cancel();
+                    self.exit_on_empty = true;
+                    if self.pid_map.is_empty() {
+                        break;
+                    }
+                }
+                ManagerEvent::ProcessKilled(p) => {
+                    self.print_log(&p, format!("Sent SIGTERM to process {}", p));
+                    self.pid_map.remove(&p);
+                    if self.pid_map.is_empty() && self.exit_on_empty {
+                        println!("All process terminated. Exiting...");
+                        break;
+                    }
+                }
+                ManagerEvent::ProcessCreated(p, pid) => {
+                    self.print_log(&p, format!("Created process with pid {}", pid));
+                    self.pid_map.insert(p, pid);
+                }
             }
         }
     }
@@ -95,7 +127,11 @@ impl ProcessManager {
                     .await;
             }
             Ok(mut child) => {
-                self.print_log(&process_cfg.name, "Created instance".to_string());
+                if let Some(pid) = child.id() {
+                    let _ = sender
+                        .send(ManagerEvent::ProcessCreated(process_cfg.name.clone(), pid))
+                        .await;
+                }
 
                 if let Some(out) = child.stdout.take() {
                     self.spawn_log_reader(
@@ -115,39 +151,59 @@ impl ProcessManager {
                     );
                 }
 
+                let token = self.cancel_token.clone();
+                let pid = child.id();
+                let process_name = process_cfg.name.clone();
                 tokio::spawn(async move {
                     let mut prev_hash: u64 = 0;
-                    loop {
-                        if process_cfg.watch.len() > 0 {
-                            let start = SystemTime::now();
-                            let mut hasher = DefaultHasher::new();
-                            for pattern in &process_cfg.watch {
-                                for path in glob(pattern).unwrap().filter_map(Result::ok) {
-                                    hasher.write(&get_modified_timestamp(&path).to_ne_bytes());
-                                }
-                            }
-                            let new_hash = hasher.finish();
-                            if prev_hash != 0 {
-                                if new_hash != prev_hash {
+                    tokio::select! {
+                        _ = token.cancelled() => {
+                            unsafe {
+                                if let Some(pid_u32) = pid {
+                                    let pid = pid_u32.try_into().unwrap();
+                                    libc::killpg(pid, libc::SIGTERM);
                                     let _ = sender
-                                        .send(ManagerEvent::RestartProcess(process_cfg, child))
+                                        .send(ManagerEvent::ProcessKilled(process_name))
                                         .await;
-                                    break;
                                 }
                             }
-                            prev_hash = new_hash;
-                            let _ = wait_min_delay(start, Duration::from_millis(500)).await;
                         }
+                        _ = async {
+                            loop {
+                                if process_cfg.watch.len() > 0 {
+                                    let start = SystemTime::now();
+                                    let mut hasher = DefaultHasher::new();
+                                    for pattern in &process_cfg.watch {
+                                        for path in glob(pattern).unwrap().filter_map(Result::ok) {
+                                            hasher.write(&get_modified_timestamp(&path).await.to_ne_bytes());
+                                        }
+                                    }
+                                    let new_hash = hasher.finish();
+                                    if prev_hash != 0 {
+                                        if new_hash != prev_hash {
+                                            let _ = sender
+                                                .send(ManagerEvent::RestartProcess(process_cfg, child))
+                                                .await;
+                                            break;
+                                        }
+                                    }
+                                    prev_hash = new_hash;
+                                    let _ = wait_min_delay(start, Duration::from_millis(500)).await;
+                                }
 
-                        if let Ok(wait) = child.try_wait() {
-                            if let Some(status) = wait {
-                                let code = status.code().unwrap_or(0);
-                                let _ = sender
-                                    .send(ManagerEvent::ProcessExited(code, process_cfg.clone()))
-                                    .await;
-                                break;
+                                let start = SystemTime::now();
+                                if let Ok(wait) = child.try_wait() {
+                                    if let Some(status) = wait {
+                                        let code = status.code().unwrap_or(0);
+                                        let _ = sender
+                                            .send(ManagerEvent::ProcessExited(code, process_cfg.clone()))
+                                            .await;
+                                        break;
+                                    }
+                                }
+                                let _ = wait_min_delay(start, Duration::from_millis(100)).await;
                             }
-                        }
+                        } => {}
                     }
                 });
             }
