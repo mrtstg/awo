@@ -290,7 +290,8 @@ impl ProcessManager {
         if self.ansi_print {
             println!(
                 "{} | {}",
-                Color::Fixed(process_data.color).paint(process_name),
+                // setting white as default color if config does not provides any
+                Color::Fixed(process_data.color.unwrap_or(7)).paint(process_name),
                 msg,
             );
         } else {

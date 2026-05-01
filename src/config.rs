@@ -12,21 +12,32 @@ pub struct Config {
 
 pub fn process_config(config: Config) -> Config {
     let mut new_config = config.clone();
-    let mut free_colors = Vec::from_iter(COLORS_RANGE);
+    let defined_colors = config
+        .run
+        .iter()
+        .filter(|(_, v)| v.color.is_some())
+        .map(|(_, v)| v.color.unwrap())
+        .collect::<Vec<u8>>();
+    let mut free_colors = Vec::from_iter(COLORS_RANGE)
+        .into_iter()
+        .filter(|v| !defined_colors.contains(v))
+        .collect::<Vec<u8>>();
     for (key, process) in config.run.into_iter() {
+        let mut nproc = process.clone();
         if process.name.is_empty() {
-            let mut nproc = process.clone();
             nproc.name = key.clone();
-            if !free_colors.is_empty() {
-                if !free_colors.contains(&nproc.color) {
-                    let ncolor = free_colors.pop();
-                    nproc.color = ncolor.unwrap_or(nproc.color);
+        }
+        match nproc.color {
+            Some(_) => continue,
+            None => {
+                if !free_colors.is_empty() {
+                    nproc.color = free_colors.pop();
                 } else {
-                    free_colors.retain(|v| *v != nproc.color);
+                    nproc.color = Some(rand::random_range(COLORS_RANGE));
                 }
             }
-            new_config.run.insert(key, nproc);
         }
+        new_config.run.insert(key, nproc);
     }
     return new_config;
 }
@@ -55,10 +66,6 @@ fn default_watch() -> Vec<String> {
     return Vec::new();
 }
 
-fn random_color() -> u8 {
-    rand::random_range(COLORS_RANGE)
-}
-
 #[derive(Deserialize, Debug, Clone)]
 pub struct Process {
     pub command: String,
@@ -72,8 +79,9 @@ pub struct Process {
     pub restart_delay: u64,
     #[serde(default = "default_watch")]
     pub watch: Vec<String>,
-    #[serde(default = "random_color")]
-    pub color: u8,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<u8>,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
