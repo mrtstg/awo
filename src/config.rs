@@ -2,12 +2,20 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 const COLORS_RANGE: std::ops::RangeInclusive<u8> = 2..=14;
+pub const DEFAULT_ON_EXIT: ProcessBehavior = ProcessBehavior::Exit;
+pub const DEFAULT_ON_ERROR: ProcessBehavior = ProcessBehavior::Exit;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Config {
     #[serde(default = "default_align")]
     pub align: bool,
     pub run: HashMap<String, Process>,
+    #[serde(default = "default_behavior")]
+    pub on_exit: ProcessBehavior,
+    #[serde(default = "default_error_behavior")]
+    pub on_error: ProcessBehavior,
+    #[serde(default = "default_restart_delay")]
+    pub restart_delay: u64,
 }
 
 pub fn process_config(config: Config) -> Config {
@@ -37,6 +45,9 @@ pub fn process_config(config: Config) -> Config {
                 }
             }
         }
+        nproc.on_exit = Some(nproc.on_exit.unwrap_or(config.on_exit.clone()));
+        nproc.on_error = Some(nproc.on_error.unwrap_or(config.on_error.clone()));
+        nproc.restart_delay = Some(nproc.restart_delay.unwrap_or(config.restart_delay.clone()));
         new_config.run.insert(key, nproc);
     }
     return new_config;
@@ -71,12 +82,15 @@ pub struct Process {
     pub command: String,
     #[serde(default = "default_name")]
     pub name: String,
-    #[serde(default = "default_behavior")]
-    pub on_exit: ProcessBehavior,
-    #[serde(default = "default_error_behavior")]
-    pub on_error: ProcessBehavior,
-    #[serde(default = "default_restart_delay")]
-    pub restart_delay: u64,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_exit: Option<ProcessBehavior>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_error: Option<ProcessBehavior>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_delay: Option<u64>,
     #[serde(default = "default_watch")]
     pub watch: Vec<String>,
     #[serde(default)]

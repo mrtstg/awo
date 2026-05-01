@@ -135,7 +135,11 @@ impl ProcessManager {
             let _ = nix::sys::signal::killpg(Pid::from_raw(pid), nix::sys::signal::Signal::SIGTERM);
         }
         let _ = child.wait().await;
-        let _ = wait_min_delay(start, Duration::from_secs(process_cfg.restart_delay)).await;
+        let _ = wait_min_delay(
+            start,
+            Duration::from_secs(process_cfg.restart_delay.unwrap_or(1)),
+        )
+        .await;
         self.send(ManagerEvent::CreateProcess(process_cfg)).await;
     }
 
@@ -259,9 +263,15 @@ impl ProcessManager {
         self.print_log(&process_cfg, format!("Exited with code {}", exit_code));
 
         let behavior = if exit_code == 0 {
-            process_cfg.on_exit.clone()
+            process_cfg
+                .on_exit
+                .clone()
+                .unwrap_or(crate::config::DEFAULT_ON_EXIT)
         } else {
-            process_cfg.on_error.clone()
+            process_cfg
+                .on_error
+                .clone()
+                .unwrap_or(crate::config::DEFAULT_ON_ERROR)
         };
 
         match behavior {
@@ -271,7 +281,8 @@ impl ProcessManager {
             }
             ProcessBehavior::Restart => {
                 self.print_log(&process_cfg, "Restarting...".to_string());
-                tokio::time::sleep(Duration::from_secs(process_cfg.restart_delay)).await;
+                tokio::time::sleep(Duration::from_secs(process_cfg.restart_delay.unwrap_or(1)))
+                    .await;
                 let _ = self
                     .sender
                     .send(ManagerEvent::CreateProcess(process_cfg))
