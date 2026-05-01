@@ -1,4 +1,4 @@
-use serde::{de::IgnoredAny, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 const COLORS_RANGE: std::ops::RangeInclusive<u8> = 2..=14;
@@ -33,6 +33,7 @@ impl Config {
                     watch: vec!["/tmp/somefile".to_string()],
                     color: Some(7),
                     hide: false,
+                    cwd: Some("/usr/bin/".to_string()),
                 },
             )]
             .into_iter()
@@ -130,6 +131,9 @@ pub struct Process {
     pub color: Option<u8>,
     #[serde(default = "default_hide")]
     pub hide: bool,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]

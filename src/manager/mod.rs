@@ -1,7 +1,7 @@
 mod process;
 mod time;
 use crate::config::{Config, Process, ProcessBehavior};
-use crate::manager::process::get_modified_timestamp;
+use crate::manager::process::{get_modified_timestamp, split_command};
 use ansi_term::Color;
 use glob::glob;
 use nix::unistd::Pid;
@@ -40,7 +40,7 @@ pub struct ProcessManager {
     padding_enabled: bool,
     cancel_token: CancellationToken,
     pid_map: HashMap<String, u32>,
-    exit_on_empty: bool,
+    awaiting_exit: bool,
     pub ansi_print: bool,
 }
 
@@ -54,20 +54,28 @@ impl ProcessManager {
             padding_enabled: true,
             cancel_token: CancellationToken::new(),
             pid_map: HashMap::new(),
-            exit_on_empty: false,
+            awaiting_exit: false,
             ansi_print: true,
         }
     }
 
     pub fn build_process_from_config(&self, data: Process) -> Result<Child, String> {
-        let cmd = &mut Command::new("/bin/sh");
+        let args = split_command(&data.command);
+        if args.is_empty() {
+            return Err("Command is empty".to_string());
+        }
+        let cmd = &mut Command::new(args[0].clone());
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .arg("-c")
-            .arg(data.command)
             .process_group(0);
+        if let Some(cwd) = data.cwd {
+            cmd.current_dir(cwd);
+        }
+        if args.len() > 1 {
+            cmd.args(&args[1..]);
+        }
         if self.ansi_print {
             cmd.env("FORCE_COLOR", "1")
                 .env("CLICOLOR_FORCE", "1")
@@ -95,26 +103,34 @@ impl ProcessManager {
     pub async fn run(&mut self) {
         while let Some(event) = self.receiver.recv().await {
             match event {
-                ManagerEvent::CreateProcess(p) => self.handle_create(p).await,
+                ManagerEvent::CreateProcess(p) => {
+                    if !self.awaiting_exit {
+                        self.handle_create(p).await
+                    }
+                }
                 ManagerEvent::ProcessExited(code, p) => {
                     self.pid_map.remove(&p.name);
                     self.handle_exit(code, p).await;
                 }
                 ManagerEvent::ProcessStdout(msg, p) => {
-                    if p.hide {
+                    if !p.hide {
                         self.print_log(&p, msg)
                     }
                 }
                 ManagerEvent::ProcessStderr(msg, p) => {
-                    if p.hide {
+                    if !p.hide {
                         self.print_log(&p, msg)
                     }
                 }
-                ManagerEvent::RestartProcess(p, child) => self.handle_restart(p, child).await,
+                ManagerEvent::RestartProcess(p, child) => {
+                    if !self.awaiting_exit {
+                        self.handle_restart(p, child).await
+                    }
+                }
                 ManagerEvent::StopRunning => {
                     println!("Awaiting process stop");
                     self.cancel_token.cancel();
-                    self.exit_on_empty = true;
+                    self.awaiting_exit = true;
                     if self.pid_map.is_empty() {
                         break;
                     }
@@ -122,7 +138,7 @@ impl ProcessManager {
                 ManagerEvent::ProcessKilled(p) => {
                     self.print_log(&p, format!("Sent SIGTERM to process {}", p.name));
                     self.pid_map.remove(&p.name);
-                    if self.pid_map.is_empty() && self.exit_on_empty {
+                    if self.pid_map.is_empty() && self.awaiting_exit {
                         println!("All process terminated. Exiting...");
                         break;
                     }
