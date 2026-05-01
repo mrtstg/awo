@@ -1,0 +1,14 @@
+align = true
+on_exit = "exit"
+on_error = "exit"
+restart_delay = 1
+
+[run.example]
+command = "echo 'Hello world!'"
+name = "optional_custom_name"
+on_exit = "ignore"
+on_error = "restart"
+restart_delay = 5
+watch = ["/tmp/somefile"]
+color = 7
+hide = false
