@@ -9,3 +9,7 @@ tokio = { version = "1", features = ["full"] }
 toml = "1.1.2"
 serde = { version = "1.0", features = ["derive"] }
 glob = "0.3.3"
+tokio-util = "0.7.18"
+rand = "0.10.1"
+ansi_term = "0.12.1"
+nix = { version = "0.31.2", features = ["signal"]}
