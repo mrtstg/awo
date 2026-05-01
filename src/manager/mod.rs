@@ -2,10 +2,11 @@ mod process;
 mod time;
 use crate::config::{Config, Process, ProcessBehavior};
 use crate::manager::process::get_modified_timestamp;
+use ansi_term::Color;
 use glob::glob;
-use libc;
-use process::build_process_from_config;
+use nix::unistd::Pid;
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::result::Result;
 use std::time::SystemTime;
 use std::{
@@ -14,6 +15,7 @@ use std::{
 };
 use time::wait_min_delay;
 use tokio::process::Child;
+use tokio::process::*;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, BufReader},
     sync::mpsc::{channel, Receiver, Sender},
@@ -26,8 +28,8 @@ pub enum ManagerEvent {
     ProcessExited(i32, Process),
     ProcessStdout(String, Process),
     ProcessStderr(String, Process),
-    ProcessKilled(String),
-    ProcessCreated(String, u32),
+    ProcessKilled(Process),
+    ProcessCreated(Process, u32),
     StopRunning,
 }
 
@@ -39,6 +41,7 @@ pub struct ProcessManager {
     cancel_token: CancellationToken,
     pid_map: HashMap<String, u32>,
     exit_on_empty: bool,
+    pub ansi_print: bool,
 }
 
 impl ProcessManager {
@@ -52,6 +55,27 @@ impl ProcessManager {
             cancel_token: CancellationToken::new(),
             pid_map: HashMap::new(),
             exit_on_empty: false,
+            ansi_print: true,
+        }
+    }
+
+    pub fn build_process_from_config(&self, data: Process) -> Result<Child, String> {
+        let cmd = &mut Command::new("/bin/sh");
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .arg("-c")
+            .arg(data.command)
+            .process_group(0);
+        if self.ansi_print {
+            cmd.env("FORCE_COLOR", "1")
+                .env("CLICOLOR_FORCE", "1")
+                .env("COLORTERM", "truecolor");
+        }
+        match cmd.spawn() {
+            Ok(child) => Ok(child),
+            Err(err) => return Err(err.to_string()),
         }
     }
 
@@ -76,8 +100,8 @@ impl ProcessManager {
                     self.pid_map.remove(&p.name);
                     self.handle_exit(code, p).await;
                 }
-                ManagerEvent::ProcessStdout(msg, p) => self.print_log(&p.name, msg),
-                ManagerEvent::ProcessStderr(msg, p) => self.print_log(&p.name, msg),
+                ManagerEvent::ProcessStdout(msg, p) => self.print_log(&p, msg),
+                ManagerEvent::ProcessStderr(msg, p) => self.print_log(&p, msg),
                 ManagerEvent::RestartProcess(p, child) => self.handle_restart(p, child).await,
                 ManagerEvent::StopRunning => {
                     println!("Awaiting process stop");
@@ -88,8 +112,8 @@ impl ProcessManager {
                     }
                 }
                 ManagerEvent::ProcessKilled(p) => {
-                    self.print_log(&p, format!("Sent SIGTERM to process {}", p));
-                    self.pid_map.remove(&p);
+                    self.print_log(&p, format!("Sent SIGTERM to process {}", p.name));
+                    self.pid_map.remove(&p.name);
                     if self.pid_map.is_empty() && self.exit_on_empty {
                         println!("All process terminated. Exiting...");
                         break;
@@ -97,20 +121,18 @@ impl ProcessManager {
                 }
                 ManagerEvent::ProcessCreated(p, pid) => {
                     self.print_log(&p, format!("Created process with pid {}", pid));
-                    self.pid_map.insert(p, pid);
+                    self.pid_map.insert(p.name, pid);
                 }
             }
         }
     }
 
     async fn handle_restart(&mut self, process_cfg: Process, mut child: Child) {
-        self.print_log(&process_cfg.name, "Killing process...".to_string());
+        self.print_log(&process_cfg, "Killing process...".to_string());
         let start = SystemTime::now();
-        unsafe {
-            if let Some(pid_u32) = child.id() {
-                let pid = pid_u32.try_into().unwrap();
-                libc::killpg(pid, libc::SIGTERM);
-            }
+        if let Some(pid_u32) = child.id() {
+            let pid = pid_u32.try_into().unwrap();
+            let _ = nix::sys::signal::killpg(Pid::from_raw(pid), nix::sys::signal::Signal::SIGTERM);
         }
         let _ = child.wait().await;
         let _ = wait_min_delay(start, Duration::from_secs(process_cfg.restart_delay)).await;
@@ -119,7 +141,7 @@ impl ProcessManager {
 
     async fn handle_create(&self, process_cfg: Process) {
         let sender = self.sender.clone();
-        match build_process_from_config(process_cfg.clone()) {
+        match self.build_process_from_config(process_cfg.clone()) {
             Err(e) => {
                 eprintln!("Failed to create process {}: {:?}", process_cfg.name, e);
                 let _ = sender
@@ -129,7 +151,7 @@ impl ProcessManager {
             Ok(mut child) => {
                 if let Some(pid) = child.id() {
                     let _ = sender
-                        .send(ManagerEvent::ProcessCreated(process_cfg.name.clone(), pid))
+                        .send(ManagerEvent::ProcessCreated(process_cfg.clone(), pid))
                         .await;
                 }
 
@@ -153,19 +175,17 @@ impl ProcessManager {
 
                 let token = self.cancel_token.clone();
                 let pid = child.id();
-                let process_name = process_cfg.name.clone();
+                let process_cfg_clone = process_cfg.clone();
                 tokio::spawn(async move {
                     let mut prev_hash: u64 = 0;
                     tokio::select! {
                         _ = token.cancelled() => {
-                            unsafe {
-                                if let Some(pid_u32) = pid {
-                                    let pid = pid_u32.try_into().unwrap();
-                                    libc::killpg(pid, libc::SIGTERM);
-                                    let _ = sender
-                                        .send(ManagerEvent::ProcessKilled(process_name))
-                                        .await;
-                                }
+                            if let Some(pid_u32) = pid {
+                                let pid = pid_u32.try_into().unwrap();
+                                let _ = nix::sys::signal::killpg(Pid::from_raw(pid), nix::sys::signal::Signal::SIGTERM);
+                                let _ = sender
+                                    .send(ManagerEvent::ProcessKilled(process_cfg_clone))
+                                    .await;
                             }
                         }
                         _ = async {
@@ -236,7 +256,7 @@ impl ProcessManager {
     }
 
     async fn handle_exit(&self, exit_code: i32, process_cfg: Process) {
-        self.print_log(&process_cfg.name, format!("Exited with code {}", exit_code));
+        self.print_log(&process_cfg, format!("Exited with code {}", exit_code));
 
         let behavior = if exit_code == 0 {
             process_cfg.on_exit.clone()
@@ -246,11 +266,11 @@ impl ProcessManager {
 
         match behavior {
             ProcessBehavior::Exit => {
-                self.print_log(&process_cfg.name, "Stopping process manager...".to_string());
+                self.print_log(&process_cfg, "Stopping process manager...".to_string());
                 let _ = self.sender.send(ManagerEvent::StopRunning).await;
             }
             ProcessBehavior::Restart => {
-                self.print_log(&process_cfg.name, "Restarting...".to_string());
+                self.print_log(&process_cfg, "Restarting...".to_string());
                 tokio::time::sleep(Duration::from_secs(process_cfg.restart_delay)).await;
                 let _ = self
                     .sender
@@ -261,11 +281,20 @@ impl ProcessManager {
         }
     }
 
-    fn print_log(&self, name: &str, msg: String) {
-        if self.padding_enabled {
-            println!("{:<width$} | {}", name, msg, width = self.padding_width);
+    fn print_log(&self, process_data: &Process, msg: String) {
+        let process_name = if self.padding_enabled {
+            format!("{:<width$}", process_data.name, width = self.padding_width)
         } else {
-            println!("{} | {}", name, msg);
+            process_data.name.clone()
+        };
+        if self.ansi_print {
+            println!(
+                "{} | {}",
+                Color::Fixed(process_data.color).paint(process_name),
+                msg,
+            );
+        } else {
+            println!("{} | {}", process_name, msg);
         }
     }
 }
