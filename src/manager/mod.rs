@@ -100,8 +100,16 @@ impl ProcessManager {
                     self.pid_map.remove(&p.name);
                     self.handle_exit(code, p).await;
                 }
-                ManagerEvent::ProcessStdout(msg, p) => self.print_log(&p, msg),
-                ManagerEvent::ProcessStderr(msg, p) => self.print_log(&p, msg),
+                ManagerEvent::ProcessStdout(msg, p) => {
+                    if p.hide {
+                        self.print_log(&p, msg)
+                    }
+                }
+                ManagerEvent::ProcessStderr(msg, p) => {
+                    if p.hide {
+                        self.print_log(&p, msg)
+                    }
+                }
                 ManagerEvent::RestartProcess(p, child) => self.handle_restart(p, child).await,
                 ManagerEvent::StopRunning => {
                     println!("Awaiting process stop");
