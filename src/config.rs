@@ -34,6 +34,12 @@ impl Config {
                     color: Some(7),
                     hide: false,
                     cwd: Some("/usr/bin/".to_string()),
+                    env: [
+                        ("ENV1".to_string(), "VALUE1".to_string()),
+                        ("ENV2".to_string(), "VALUE2".to_string()),
+                    ]
+                    .into_iter()
+                    .collect::<HashMap<String, String>>(),
                 },
             )]
             .into_iter()
@@ -134,6 +140,9 @@ pub struct Process {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]

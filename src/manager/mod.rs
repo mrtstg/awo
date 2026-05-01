@@ -81,6 +81,9 @@ impl ProcessManager {
                 .env("CLICOLOR_FORCE", "1")
                 .env("COLORTERM", "truecolor");
         }
+        for (key, value) in data.env {
+            cmd.env(key, value);
+        }
         match cmd.spawn() {
             Ok(child) => Ok(child),
             Err(err) => return Err(err.to_string()),
