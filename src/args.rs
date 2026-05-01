@@ -7,4 +7,7 @@ pub struct Args {
     /// Path to process file
     #[arg(short, long, value_name = "FILE", default_value = "./awo.toml")]
     pub config: PathBuf,
+    /// Disable ANSI coloring
+    #[arg(short, long, default_value_t = false)]
+    pub no_ansi: bool,
 }

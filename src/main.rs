@@ -28,10 +28,12 @@ async fn main() {
                 Ok(raw_cfg) => {
                     let cfg = process_config(raw_cfg);
                     let mut manager = ProcessManager::new(4096);
+                    manager.ansi_print = !run_args.no_ansi;
                     tokio::select! {
                         _ = tokio::signal::ctrl_c() => {
                             println!("Ctrl+C received, shutting down.");
                             manager.send(manager::ManagerEvent::StopRunning).await;
+                            manager.run().await;
                         }
                         _ = async {
                             manager.init_process(&cfg).await;
