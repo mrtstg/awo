@@ -10,4 +10,7 @@ pub struct Args {
     /// Disable ANSI coloring
     #[arg(short, long, default_value_t = false)]
     pub no_ansi: bool,
+    /// Print sample config
+    #[arg(short, long, default_value_t = false)]
+    pub sample: bool,
 }

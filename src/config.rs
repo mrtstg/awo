@@ -1,11 +1,11 @@
-use serde::Deserialize;
+use serde::{de::IgnoredAny, Deserialize, Serialize};
 use std::collections::HashMap;
 
 const COLORS_RANGE: std::ops::RangeInclusive<u8> = 2..=14;
 pub const DEFAULT_ON_EXIT: ProcessBehavior = ProcessBehavior::Exit;
 pub const DEFAULT_ON_ERROR: ProcessBehavior = ProcessBehavior::Exit;
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct Config {
     #[serde(default = "default_align")]
     pub align: bool,
@@ -16,6 +16,33 @@ pub struct Config {
     pub on_error: ProcessBehavior,
     #[serde(default = "default_restart_delay")]
     pub restart_delay: u64,
+}
+
+impl Config {
+    pub fn sample() -> Config {
+        Config {
+            align: true,
+            run: [(
+                "example",
+                Process {
+                    command: "echo 'Hello world!'".to_string(),
+                    name: "optional_custom_name".to_string(),
+                    on_exit: Some(ProcessBehavior::Ignore),
+                    on_error: Some(ProcessBehavior::Restart),
+                    restart_delay: Some(5),
+                    watch: vec!["/tmp/somefile".to_string()],
+                    color: Some(7),
+                    hide: false,
+                },
+            )]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect::<HashMap<String, Process>>(),
+            on_exit: ProcessBehavior::Exit,
+            on_error: ProcessBehavior::Exit,
+            restart_delay: 1,
+        }
+    }
 }
 
 pub fn process_config(config: Config) -> Config {
@@ -77,9 +104,14 @@ fn default_watch() -> Vec<String> {
     return Vec::new();
 }
 
-#[derive(Deserialize, Debug, Clone)]
+fn default_hide() -> bool {
+    return false;
+}
+
+#[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct Process {
     pub command: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     #[serde(default = "default_name")]
     pub name: String,
     #[serde(default)]
@@ -96,9 +128,11 @@ pub struct Process {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<u8>,
+    #[serde(default = "default_hide")]
+    pub hide: bool,
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProcessBehavior {
     Exit,

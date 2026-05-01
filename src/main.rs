@@ -12,6 +12,13 @@ use toml;
 #[tokio::main]
 async fn main() {
     let run_args = args::Args::parse();
+    if run_args.sample {
+        let cfg = toml::to_string_pretty(&Config::sample());
+        if let Ok(s) = cfg {
+            println!("{}", s);
+        }
+        exit(0);
+    }
     let cfg_read = fs::read_to_string(run_args.config);
     match cfg_read {
         Err(e) => {
