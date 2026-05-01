@@ -2,7 +2,12 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None, name="awo")]
+#[command(
+    version,
+    about,
+    long_about = "Process manager for developers written in Rust.",
+    name = "awo"
+)]
 pub struct Args {
     /// Path to process file
     #[arg(short, long, value_name = "FILE", default_value = "./awo.toml")]
