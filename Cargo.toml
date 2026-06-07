@@ -1,6 +1,6 @@
 [package]
 name = "awo"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Ilya Zamaratskikh <mrtstgdev@gmail.com>"]
 edition = "2024"
 license = "BSD-3-Clause"
