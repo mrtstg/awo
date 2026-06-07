@@ -18,4 +18,6 @@ pub struct Args {
     /// Print sample config
     #[arg(short, long, default_value_t = false)]
     pub sample: bool,
+    #[arg(short, long)]
+    pub except: Vec<String>,
 }

@@ -19,7 +19,7 @@ async fn main() {
         }
         exit(0);
     }
-    let cfg_read = fs::read_to_string(run_args.config);
+    let cfg_read = fs::read_to_string(run_args.config.clone());
     match cfg_read {
         Err(e) => {
             println!("Failed reading config: {:?}", e);
@@ -33,9 +33,9 @@ async fn main() {
                     exit(1)
                 }
                 Ok(raw_cfg) => {
-                    let cfg = process_config(raw_cfg);
                     let mut manager = ProcessManager::new(4096);
                     manager.ansi_print = !run_args.no_ansi;
+                    let cfg = process_config(raw_cfg, run_args);
                     tokio::select! {
                         _ = tokio::signal::ctrl_c() => {
                             println!("Ctrl+C received, shutting down.");

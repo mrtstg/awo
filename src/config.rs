@@ -52,8 +52,23 @@ impl Config {
     }
 }
 
-pub fn process_config(config: Config) -> Config {
+pub fn process_config(config: Config, args: crate::args::Args) -> Config {
+    let config_apps = config.run.iter().map(|(k, _)| k).collect::<Vec<&String>>();
+    let unknown_apps = args
+        .except
+        .clone()
+        .into_iter()
+        .filter(|v| !config_apps.contains(&v));
+    for app_name in unknown_apps {
+        println!("Unknown app name: {}!", app_name);
+    }
+
     let mut new_config = config.clone();
+    new_config.run = new_config
+        .run
+        .into_iter()
+        .filter(|(k, _)| !args.except.contains(k))
+        .collect::<HashMap<String, Process>>();
     let defined_colors = config
         .run
         .iter()
@@ -64,7 +79,11 @@ pub fn process_config(config: Config) -> Config {
         .into_iter()
         .filter(|v| !defined_colors.contains(v))
         .collect::<Vec<u8>>();
-    for (key, process) in config.run.into_iter() {
+    for (key, process) in config
+        .run
+        .into_iter()
+        .filter(|(k, _)| !args.except.contains(k))
+    {
         let mut nproc = process.clone();
         if process.name.is_empty() {
             nproc.name = key.clone();
