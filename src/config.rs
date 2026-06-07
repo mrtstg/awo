@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const COLORS_RANGE: std::ops::RangeInclusive<u8> = 2..=14;
 pub const DEFAULT_ON_EXIT: ProcessBehavior = ProcessBehavior::Exit;
@@ -54,11 +54,16 @@ impl Config {
 
 pub fn process_config(config: Config, args: crate::args::Args) -> Config {
     let config_apps = config.run.iter().map(|(k, _)| k).collect::<Vec<&String>>();
-    let unknown_apps = args
-        .except
-        .clone()
+    let total_apps = {
+        let mut a = Vec::new();
+        a.extend(args.except.clone());
+        a.extend(args.hide.clone());
+        a
+    };
+    let unknown_apps = total_apps
         .into_iter()
-        .filter(|v| !config_apps.contains(&v));
+        .filter(|v| !config_apps.contains(&v))
+        .collect::<HashSet<String>>();
     for app_name in unknown_apps {
         println!("Unknown app name: {}!", app_name);
     }
@@ -98,6 +103,11 @@ pub fn process_config(config: Config, args: crate::args::Args) -> Config {
                 }
             }
         }
+        nproc.hide = if args.hide.contains(&nproc.name) {
+            true
+        } else {
+            nproc.hide
+        };
         nproc.on_exit = Some(nproc.on_exit.unwrap_or(config.on_exit.clone()));
         nproc.on_error = Some(nproc.on_error.unwrap_or(config.on_error.clone()));
         nproc.restart_delay = Some(nproc.restart_delay.unwrap_or(config.restart_delay.clone()));

@@ -51,6 +51,7 @@ awo [FLAGS]
 | `-V` | Print the version 🏷️ |
 | `-c <path>` | Use a custom path for the config file [default: `./awo.toml`] |
 | `-e <key>`/`--except <key>` | Run config, excluding app with provided key. For example `-e example` for config below. Can be used multiple times. |
+| `-h <key>`/`--hide <key>` | Force hiding output from app with provided key. Overrides the config value. |
 
 The manager can be gracefully stopped by `<Ctrl+C>` or by sending `SIGINT`.
 

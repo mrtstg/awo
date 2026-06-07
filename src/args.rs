@@ -18,6 +18,10 @@ pub struct Args {
     /// Print sample config
     #[arg(short, long, default_value_t = false)]
     pub sample: bool,
+    /// Exclude app from lauching
     #[arg(short, long)]
     pub except: Vec<String>,
+    /// Force hiding output of app
+    #[arg(short, long)]
+    pub hide: Vec<String>,
 }
