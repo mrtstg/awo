@@ -210,7 +210,7 @@ impl ProcessManager {
                 eprintln!("Failed to create process {}: {:?}", process_cfg.name, e);
 
                 sender
-                    .send(ManagerEvent::ProcessExited(0, process_cfg))
+                    .send(ManagerEvent::ProcessExited(-1, process_cfg))
                     .await?;
             }
             Ok(mut child) => {
@@ -364,12 +364,17 @@ impl ProcessManager {
             }
             ProcessBehavior::Restart => {
                 self.print_log(&process_cfg, "Restarting...");
-                tokio::time::sleep(Duration::from_secs(process_cfg.restart_delay.unwrap_or(1)))
-                    .await;
+                let sender = self.sender.clone();
+                let delay = process_cfg.restart_delay.unwrap_or(1);
 
-                self.sender
-                    .send(ManagerEvent::CreateProcess(process_cfg))
-                    .await?;
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(delay)).await;
+                    sender
+                        .send(ManagerEvent::CreateProcess(process_cfg))
+                        .await?;
+
+                    Ok::<(), anyhow::Error>(())
+                });
             }
             ProcessBehavior::Ignore => {}
         }
