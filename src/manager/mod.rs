@@ -3,33 +3,36 @@ mod time;
 use crate::config::{Config, Process, ProcessBehavior};
 use crate::manager::process::{get_modified_timestamp, split_command};
 use ansi_term::Color;
+use anyhow::Context;
 use glob::glob;
 use nix::unistd::Pid;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::result::Result;
+use std::sync::Arc;
 use std::time::SystemTime;
 use std::{
     hash::{DefaultHasher, Hasher},
     time::Duration,
 };
 use time::wait_min_delay;
+use tokio::io::AsyncRead;
 use tokio::process::Child;
 use tokio::process::*;
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, BufReader},
-    sync::mpsc::{channel, Receiver, Sender},
+    io::{AsyncBufReadExt, BufReader},
+    sync::mpsc::{Receiver, Sender, channel},
 };
 use tokio_util::sync::CancellationToken;
 
 pub enum ManagerEvent {
-    CreateProcess(Process),
-    RestartProcess(Process, Child),
-    ProcessExited(i32, Process),
-    ProcessStdout(String, Process),
-    ProcessStderr(String, Process),
-    ProcessKilled(Process),
-    ProcessCreated(Process, u32),
+    CreateProcess(Arc<Process>),
+    RestartProcess(Arc<Process>, Child),
+    ProcessExited(i32, Arc<Process>),
+    ProcessStdout(String, Arc<Process>),
+    ProcessStderr(String, Arc<Process>),
+    ProcessKilled(Arc<Process>),
+    ProcessCreated(Arc<Process>, u32),
     StopRunning,
 }
 
@@ -59,18 +62,20 @@ impl ProcessManager {
         }
     }
 
-    pub fn build_process_from_config(&self, data: Process) -> Result<Child, String> {
+    pub fn build_process_from_config(&self, data: Arc<Process>) -> Result<Child, String> {
         let args = split_command(&data.command);
         if args.is_empty() {
             return Err("Command is empty".to_string());
         }
+
         let cmd = &mut Command::new(args[0].clone());
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .process_group(0);
-        if let Some(cwd) = data.cwd {
+
+        if let Some(cwd) = &data.cwd {
             cmd.current_dir(cwd);
         }
         if args.len() > 1 {
@@ -81,109 +86,138 @@ impl ProcessManager {
                 .env("CLICOLOR_FORCE", "1")
                 .env("COLORTERM", "truecolor");
         }
-        for (key, value) in data.env {
+
+        for (key, value) in &data.env {
             cmd.env(key, value);
         }
+
         match cmd.spawn() {
             Ok(child) => Ok(child),
             Err(err) => return Err(err.to_string()),
         }
     }
 
-    pub async fn init_process(&mut self, config: &Config) {
+    pub async fn init_process(&mut self, config: &Config) -> anyhow::Result<()> {
         for process in config.run.values() {
-            self.send(ManagerEvent::CreateProcess(process.clone()))
-                .await
+            self.send(ManagerEvent::CreateProcess(Arc::new(process.clone())))
+                .await?;
         }
+
         self.padding_width = config.run.values().map(|v| v.name.len()).max().unwrap_or(0);
         self.padding_enabled = config.align;
+
+        Ok(())
     }
 
-    pub async fn send(&mut self, payload: ManagerEvent) {
-        let _ = self.sender.send(payload).await;
+    pub async fn send(&mut self, payload: ManagerEvent) -> anyhow::Result<()> {
+        self.sender.send(payload).await?;
+
+        Ok(())
     }
 
-    pub async fn run(&mut self) {
+    pub async fn run(&mut self) -> anyhow::Result<()> {
         while let Some(event) = self.receiver.recv().await {
             match event {
                 ManagerEvent::CreateProcess(p) => {
                     if !self.awaiting_exit {
-                        self.handle_create(p).await
+                        self.handle_create(p).await?
                     }
                 }
                 ManagerEvent::ProcessExited(code, p) => {
                     self.pid_map.remove(&p.name);
-                    self.handle_exit(code, p).await;
+                    self.handle_exit(code, p).await?;
                 }
                 ManagerEvent::ProcessStdout(msg, p) => {
                     if !p.hide {
-                        self.print_log(&p, msg)
+                        self.print_log(&p, &msg)
                     }
                 }
                 ManagerEvent::ProcessStderr(msg, p) => {
                     if !p.hide {
-                        self.print_log(&p, msg)
+                        self.print_log(&p, &msg)
                     }
                 }
                 ManagerEvent::RestartProcess(p, child) => {
                     if !self.awaiting_exit {
-                        self.handle_restart(p, child).await
+                        self.handle_restart(p, child).await?
                     }
                 }
                 ManagerEvent::StopRunning => {
                     println!("Awaiting process stop");
                     self.cancel_token.cancel();
                     self.awaiting_exit = true;
+
                     if self.pid_map.is_empty() {
                         break;
                     }
                 }
                 ManagerEvent::ProcessKilled(p) => {
-                    self.print_log(&p, format!("Sent SIGTERM to process {}", p.name));
+                    self.print_log(&p, &format!("Sent SIGTERM to process {}", p.name));
                     self.pid_map.remove(&p.name);
+
                     if self.pid_map.is_empty() && self.awaiting_exit {
                         println!("All process terminated. Exiting...");
                         break;
                     }
                 }
                 ManagerEvent::ProcessCreated(p, pid) => {
-                    self.print_log(&p, format!("Created process with pid {}", pid));
-                    self.pid_map.insert(p.name, pid);
+                    self.print_log(&p, &format!("Created process with pid {}", pid));
+                    self.pid_map.insert(p.name.clone(), pid);
                 }
             }
         }
+
+        Ok(())
     }
 
-    async fn handle_restart(&mut self, process_cfg: Process, mut child: Child) {
-        self.print_log(&process_cfg, "Killing process...".to_string());
+    async fn handle_restart(
+        &mut self,
+        process_cfg: Arc<Process>,
+        mut child: Child,
+    ) -> anyhow::Result<()> {
+        self.print_log(&process_cfg, &"Killing process...");
         let start = SystemTime::now();
         if let Some(pid_u32) = child.id() {
-            let pid = pid_u32.try_into().unwrap();
-            let _ = nix::sys::signal::killpg(Pid::from_raw(pid), nix::sys::signal::Signal::SIGTERM);
+            let pid = pid_u32.try_into().context("overflow")?;
+
+            if let Err(e) =
+                nix::sys::signal::killpg(Pid::from_raw(pid), nix::sys::signal::Signal::SIGTERM)
+            {
+                // ESRCH means the process is already dead, so we can ignore that error
+                if e != nix::errno::Errno::ESRCH {
+                    return Err(e.into());
+                }
+            }
         }
-        let _ = child.wait().await;
-        let _ = wait_min_delay(
+
+        child.wait().await?;
+
+        wait_min_delay(
             start,
             Duration::from_secs(process_cfg.restart_delay.unwrap_or(1)),
         )
-        .await;
-        self.send(ManagerEvent::CreateProcess(process_cfg)).await;
+        .await?;
+
+        self.send(ManagerEvent::CreateProcess(process_cfg)).await?;
+
+        Ok(())
     }
 
-    async fn handle_create(&self, process_cfg: Process) {
+    async fn handle_create(&self, process_cfg: Arc<Process>) -> anyhow::Result<()> {
         let sender = self.sender.clone();
         match self.build_process_from_config(process_cfg.clone()) {
             Err(e) => {
                 eprintln!("Failed to create process {}: {:?}", process_cfg.name, e);
-                let _ = sender
+
+                sender
                     .send(ManagerEvent::ProcessExited(0, process_cfg))
-                    .await;
+                    .await?;
             }
             Ok(mut child) => {
                 if let Some(pid) = child.id() {
-                    let _ = sender
+                    sender
                         .send(ManagerEvent::ProcessCreated(process_cfg.clone(), pid))
-                        .await;
+                        .await?;
                 }
 
                 if let Some(out) = child.stdout.take() {
@@ -207,64 +241,82 @@ impl ProcessManager {
                 let token = self.cancel_token.clone();
                 let pid = child.id();
                 let process_cfg_clone = process_cfg.clone();
+
                 tokio::spawn(async move {
                     let mut prev_hash: u64 = 0;
                     tokio::select! {
                         _ = token.cancelled() => {
                             if let Some(pid_u32) = pid {
-                                let pid = pid_u32.try_into().unwrap();
-                                let _ = nix::sys::signal::killpg(Pid::from_raw(pid), nix::sys::signal::Signal::SIGTERM);
-                                let _ = sender
+                                let pid = pid_u32.try_into().context("overflow")?;
+
+                                if let Err(e) = nix::sys::signal::killpg(Pid::from_raw(pid), nix::sys::signal::Signal::SIGTERM) {
+                                    // ESRCH means the process is already dead, so we can ignore that error
+                                    if e != nix::errno::Errno::ESRCH {
+                                        return Err(e.into());
+                                    }
+                                }
+
+                                sender
                                     .send(ManagerEvent::ProcessKilled(process_cfg_clone))
-                                    .await;
+                                    .await?;
                             }
                         }
                         _ = async {
                             loop {
                                 if process_cfg.watch.len() > 0 {
                                     let start = SystemTime::now();
+
                                     let mut hasher = DefaultHasher::new();
                                     for pattern in &process_cfg.watch {
-                                        for path in glob(pattern).unwrap().filter_map(Result::ok) {
+                                        for path in glob(pattern)?.filter_map(Result::ok) {
                                             hasher.write(&get_modified_timestamp(&path).await.to_ne_bytes());
                                         }
                                     }
+
                                     let new_hash = hasher.finish();
                                     if prev_hash != 0 {
                                         if new_hash != prev_hash {
-                                            let _ = sender
+                                            sender
                                                 .send(ManagerEvent::RestartProcess(process_cfg, child))
-                                                .await;
+                                                .await?;
                                             break;
                                         }
                                     }
                                     prev_hash = new_hash;
-                                    let _ = wait_min_delay(start, Duration::from_millis(500)).await;
+
+                                    wait_min_delay(start, Duration::from_millis(500)).await?;
                                 }
 
                                 let start = SystemTime::now();
                                 if let Ok(wait) = child.try_wait() {
                                     if let Some(status) = wait {
                                         let code = status.code().unwrap_or(0);
-                                        let _ = sender
+                                        sender
                                             .send(ManagerEvent::ProcessExited(code, process_cfg.clone()))
-                                            .await;
+                                            .await?;
                                         break;
                                     }
                                 }
-                                let _ = wait_min_delay(start, Duration::from_millis(100)).await;
+
+                                wait_min_delay(start, Duration::from_millis(100)).await?;
                             }
+
+                            Ok::<(), anyhow::Error>(())
                         } => {}
                     }
+
+                    Ok::<(), anyhow::Error>(())
                 });
             }
         }
+
+        Ok(())
     }
 
-    fn spawn_log_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    fn spawn_log_reader<R: AsyncRead + Unpin + Send + 'static>(
         &self,
         sender: Sender<ManagerEvent>,
-        process: Process,
+        process: Arc<Process>,
         reader: R,
         is_stdout: bool,
     ) {
@@ -279,15 +331,18 @@ impl ProcessManager {
                         } else {
                             ManagerEvent::ProcessStderr(line, process.clone())
                         };
-                        let _ = sender.send(event).await;
+
+                        sender.send(event).await?;
                     }
                 }
             }
+
+            Ok::<(), anyhow::Error>(())
         });
     }
 
-    async fn handle_exit(&self, exit_code: i32, process_cfg: Process) {
-        self.print_log(&process_cfg, format!("Exited with code {}", exit_code));
+    async fn handle_exit(&self, exit_code: i32, process_cfg: Arc<Process>) -> anyhow::Result<()> {
+        self.print_log(&process_cfg, &format!("Exited with code {}", exit_code));
 
         let behavior = if exit_code == 0 {
             process_cfg
@@ -303,28 +358,32 @@ impl ProcessManager {
 
         match behavior {
             ProcessBehavior::Exit => {
-                self.print_log(&process_cfg, "Stopping process manager...".to_string());
-                let _ = self.sender.send(ManagerEvent::StopRunning).await;
+                self.print_log(&process_cfg, "Stopping process manager...");
+
+                self.sender.send(ManagerEvent::StopRunning).await?;
             }
             ProcessBehavior::Restart => {
-                self.print_log(&process_cfg, "Restarting...".to_string());
+                self.print_log(&process_cfg, "Restarting...");
                 tokio::time::sleep(Duration::from_secs(process_cfg.restart_delay.unwrap_or(1)))
                     .await;
-                let _ = self
-                    .sender
+
+                self.sender
                     .send(ManagerEvent::CreateProcess(process_cfg))
-                    .await;
+                    .await?;
             }
             ProcessBehavior::Ignore => {}
         }
+
+        Ok(())
     }
 
-    fn print_log(&self, process_data: &Process, msg: String) {
+    fn print_log(&self, process_data: &Process, msg: &str) {
         let process_name = if self.padding_enabled {
-            format!("{:<width$}", process_data.name, width = self.padding_width)
+            &format!("{:<width$}", process_data.name, width = self.padding_width)
         } else {
-            process_data.name.clone()
+            &process_data.name
         };
+
         if self.ansi_print {
             println!(
                 "{} | {}",

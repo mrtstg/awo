@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+use crate::args::Args;
+
 const COLORS_RANGE: std::ops::RangeInclusive<u8> = 2..=14;
 pub const DEFAULT_ON_EXIT: ProcessBehavior = ProcessBehavior::Exit;
 pub const DEFAULT_ON_ERROR: ProcessBehavior = ProcessBehavior::Exit;
@@ -52,18 +54,19 @@ impl Config {
     }
 }
 
-pub fn process_config(config: Config, args: crate::args::Args) -> Config {
+pub fn process_config(config: Config, args: &Args) -> Config {
     let config_apps = config.run.iter().map(|(k, _)| k).collect::<Vec<&String>>();
-    let total_apps = {
-        let mut a = Vec::new();
-        a.extend(args.except.clone());
-        a.extend(args.hide.clone());
-        a
-    };
+    let total_apps = args
+        .except
+        .iter()
+        .chain(args.hide.iter())
+        .collect::<Vec<&String>>();
+
     let unknown_apps = total_apps
         .into_iter()
         .filter(|v| !config_apps.contains(&v))
-        .collect::<HashSet<String>>();
+        .collect::<HashSet<&String>>();
+
     for app_name in unknown_apps {
         println!("Unknown app name: {}!", app_name);
     }
@@ -74,6 +77,7 @@ pub fn process_config(config: Config, args: crate::args::Args) -> Config {
         .into_iter()
         .filter(|(k, _)| !args.except.contains(k))
         .collect::<HashMap<String, Process>>();
+
     let defined_colors = config
         .run
         .iter()
@@ -84,12 +88,14 @@ pub fn process_config(config: Config, args: crate::args::Args) -> Config {
         .into_iter()
         .filter(|v| !defined_colors.contains(v))
         .collect::<Vec<u8>>();
+
     for (key, process) in config
         .run
         .into_iter()
         .filter(|(k, _)| !args.except.contains(k))
     {
         let mut nproc = process.clone();
+
         if process.name.is_empty() {
             nproc.name = key.clone();
         }
@@ -111,8 +117,10 @@ pub fn process_config(config: Config, args: crate::args::Args) -> Config {
         nproc.on_exit = Some(nproc.on_exit.unwrap_or(config.on_exit.clone()));
         nproc.on_error = Some(nproc.on_error.unwrap_or(config.on_error.clone()));
         nproc.restart_delay = Some(nproc.restart_delay.unwrap_or(config.restart_delay.clone()));
+
         new_config.run.insert(key, nproc);
     }
+
     return new_config;
 }
 

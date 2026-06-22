@@ -3,14 +3,14 @@ mod config;
 mod manager;
 use crate::manager::ProcessManager;
 use clap::Parser;
-use config::{process_config, Config};
+use config::{Config, process_config};
 use std::fs;
 use std::process::exit;
 use tokio;
 use toml;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let run_args = args::Args::parse();
     if run_args.sample {
         let cfg = toml::to_string_pretty(&Config::sample());
@@ -19,7 +19,8 @@ async fn main() {
         }
         exit(0);
     }
-    let cfg_read = fs::read_to_string(run_args.config.clone());
+
+    let cfg_read = fs::read_to_string(&run_args.config);
     match cfg_read {
         Err(e) => {
             println!("Failed reading config: {:?}", e);
@@ -35,20 +36,32 @@ async fn main() {
                 Ok(raw_cfg) => {
                     let mut manager = ProcessManager::new(4096);
                     manager.ansi_print = !run_args.no_ansi;
-                    let cfg = process_config(raw_cfg, run_args);
+
+                    let cfg = process_config(raw_cfg, &run_args);
                     tokio::select! {
                         _ = tokio::signal::ctrl_c() => {
                             println!("Ctrl+C received, shutting down.");
-                            manager.send(manager::ManagerEvent::StopRunning).await;
-                            manager.run().await;
+                            manager.send(manager::ManagerEvent::StopRunning).await?;
+
+                            if let Err(e) = manager.run().await  {
+                                eprintln!("Error occurred while running manager: {:?}", e);
+                            }
                         }
+
                         _ = async {
-                            manager.init_process(&cfg).await;
-                            manager.run().await;
+                            manager.init_process(&cfg).await?;
+
+                            if let Err(e) = manager.run().await  {
+                                eprintln!("Error occurred while running manager: {:?}", e);
+                            }
+
+                            Ok::<(), anyhow::Error>(())
                         } => {}
                     }
                 }
             }
         }
     }
+
+    Ok(())
 }
