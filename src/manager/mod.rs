@@ -1,38 +1,35 @@
 mod process;
-mod time;
+mod watcher;
+
 use crate::config::{Config, Process, ProcessBehavior};
-use crate::manager::process::{get_modified_timestamp, split_command};
+use crate::manager::process::split_command;
+use crate::manager::watcher::{FileWatcher, WatcherEvent};
+
 use ansi_term::Color;
 use anyhow::Context;
-use glob::glob;
 use nix::unistd::Pid;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::result::Result;
 use std::sync::Arc;
-use std::time::SystemTime;
-use std::{
-    hash::{DefaultHasher, Hasher},
-    time::Duration,
-};
-use time::wait_min_delay;
+use std::time::Duration;
 use tokio::io::AsyncRead;
 use tokio::process::Child;
 use tokio::process::*;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
-    sync::mpsc::{Receiver, Sender, channel},
+    sync::mpsc::{channel, Receiver, Sender},
 };
 use tokio_util::sync::CancellationToken;
 
 pub enum ManagerEvent {
     CreateProcess(Arc<Process>),
-    RestartProcess(Arc<Process>, Child),
     ProcessExited(i32, Arc<Process>),
     ProcessStdout(String, Arc<Process>),
     ProcessStderr(String, Arc<Process>),
     ProcessKilled(Arc<Process>),
     ProcessCreated(Arc<Process>, u32),
+    LogProcess(Arc<Process>, String),
     StopRunning,
 }
 
@@ -118,6 +115,9 @@ impl ProcessManager {
     pub async fn run(&mut self) -> anyhow::Result<()> {
         while let Some(event) = self.receiver.recv().await {
             match event {
+                ManagerEvent::LogProcess(process_cfg, msg) => {
+                    self.print_log(&process_cfg, msg.as_str());
+                }
                 ManagerEvent::CreateProcess(p) => {
                     if !self.awaiting_exit {
                         self.handle_create(p).await?
@@ -135,11 +135,6 @@ impl ProcessManager {
                 ManagerEvent::ProcessStderr(msg, p) => {
                     if !p.hide {
                         self.print_log(&p, &msg)
-                    }
-                }
-                ManagerEvent::RestartProcess(p, child) => {
-                    if !self.awaiting_exit {
-                        self.handle_restart(p, child).await?
                     }
                 }
                 ManagerEvent::StopRunning => {
@@ -166,39 +161,6 @@ impl ProcessManager {
                 }
             }
         }
-
-        Ok(())
-    }
-
-    async fn handle_restart(
-        &mut self,
-        process_cfg: Arc<Process>,
-        mut child: Child,
-    ) -> anyhow::Result<()> {
-        self.print_log(&process_cfg, &"Killing process...");
-        let start = SystemTime::now();
-        if let Some(pid_u32) = child.id() {
-            let pid = pid_u32.try_into().context("overflow")?;
-
-            if let Err(e) =
-                nix::sys::signal::killpg(Pid::from_raw(pid), nix::sys::signal::Signal::SIGTERM)
-            {
-                // ESRCH means the process is already dead, so we can ignore that error
-                if e != nix::errno::Errno::ESRCH {
-                    return Err(e.into());
-                }
-            }
-        }
-
-        child.wait().await?;
-
-        wait_min_delay(
-            start,
-            Duration::from_secs(process_cfg.restart_delay.unwrap_or(1)),
-        )
-        .await?;
-
-        self.send(ManagerEvent::CreateProcess(process_cfg)).await?;
 
         Ok(())
     }
@@ -238,79 +200,138 @@ impl ProcessManager {
                     );
                 }
 
-                let token = self.cancel_token.clone();
-                let pid = child.id();
-                let process_cfg_clone = process_cfg.clone();
-
-                tokio::spawn(async move {
-                    let mut prev_hash: u64 = 0;
-                    tokio::select! {
-                        _ = token.cancelled() => {
-                            if let Some(pid_u32) = pid {
-                                let pid = pid_u32.try_into().context("overflow")?;
-
-                                if let Err(e) = nix::sys::signal::killpg(Pid::from_raw(pid), nix::sys::signal::Signal::SIGTERM) {
-                                    // ESRCH means the process is already dead, so we can ignore that error
-                                    if e != nix::errno::Errno::ESRCH {
-                                        return Err(e.into());
-                                    }
-                                }
-
-                                sender
-                                    .send(ManagerEvent::ProcessKilled(process_cfg_clone))
-                                    .await?;
-                            }
-                        }
-                        _ = async {
-                            loop {
-                                if process_cfg.watch.len() > 0 {
-                                    let start = SystemTime::now();
-
-                                    let mut hasher = DefaultHasher::new();
-                                    for pattern in &process_cfg.watch {
-                                        for path in glob(pattern)?.filter_map(Result::ok) {
-                                            hasher.write(&get_modified_timestamp(&path).await.to_ne_bytes());
-                                        }
-                                    }
-
-                                    let new_hash = hasher.finish();
-                                    if prev_hash != 0 {
-                                        if new_hash != prev_hash {
-                                            sender
-                                                .send(ManagerEvent::RestartProcess(process_cfg, child))
-                                                .await?;
-                                            break;
-                                        }
-                                    }
-                                    prev_hash = new_hash;
-
-                                    wait_min_delay(start, Duration::from_millis(500)).await?;
-                                }
-
-                                let start = SystemTime::now();
-                                if let Ok(wait) = child.try_wait() {
-                                    if let Some(status) = wait {
-                                        let code = status.code().unwrap_or(0);
-                                        sender
-                                            .send(ManagerEvent::ProcessExited(code, process_cfg.clone()))
-                                            .await?;
-                                        break;
-                                    }
-                                }
-
-                                wait_min_delay(start, Duration::from_millis(100)).await?;
-                            }
-
-                            Ok::<(), anyhow::Error>(())
-                        } => {}
-                    }
-
-                    Ok::<(), anyhow::Error>(())
-                });
+                Self::spawn_process_monitor(
+                    child,
+                    sender.clone(),
+                    process_cfg,
+                    self.cancel_token.clone(),
+                )
+                .await;
             }
         }
 
         Ok(())
+    }
+
+    async fn spawn_process_monitor(
+        mut child: Child,
+        sender: Sender<ManagerEvent>,
+        process_cfg: Arc<Process>,
+        cancel_token: CancellationToken,
+    ) {
+        let sender = sender.clone();
+        let process_cfg = process_cfg.clone();
+
+        // Set up file watcher if watch patterns are defined
+        let (watcher_rx, watcher_cancel) = if process_cfg.watch.is_empty() {
+            (None, None)
+        } else {
+            let (tx, rx) = channel::<WatcherEvent>(32);
+            let cancel = CancellationToken::new();
+            let watcher = FileWatcher::new(process_cfg.watch.clone(), tx, cancel.clone());
+            tokio::spawn(async move {
+                let _ = watcher.start_watching().await;
+            });
+            (Some(rx), Some(cancel))
+        };
+
+        let cancel_for_monitor = cancel_token.clone();
+        let watcher_cancel_for_handler = watcher_cancel.clone();
+        let mut watcher_rx_opt = watcher_rx;
+
+        tokio::spawn(async move {
+            loop {
+                if cancel_for_monitor.is_cancelled() {
+                    if let Some(pid_u32) = child.id() {
+                        let pid = pid_u32.try_into().context("overflow").ok();
+                        if let Some(pid) = pid {
+                            let _ = nix::sys::signal::killpg(
+                                Pid::from_raw(pid),
+                                nix::sys::signal::Signal::SIGTERM,
+                            );
+                        }
+                    }
+                    let _ = child.wait().await;
+                    let _ = sender
+                        .send(ManagerEvent::ProcessKilled(process_cfg.clone()))
+                        .await;
+                    return;
+                }
+
+                if let Some(ref mut rx) = watcher_rx_opt {
+                    match rx.try_recv() {
+                        Ok(WatcherEvent::InitialScanComplete(path_amount)) => {
+                            let _ = sender
+                                .send(ManagerEvent::LogProcess(
+                                    process_cfg.clone(),
+                                    format!("File watcher is watching {} paths", path_amount),
+                                ))
+                                .await;
+                        }
+                        Ok(WatcherEvent::FileChanged(paths)) => {
+                            let _ = sender
+                                .send(ManagerEvent::LogProcess(
+                                    process_cfg.clone(),
+                                    format!(
+                                        "Following paths has changed: {}",
+                                        paths
+                                            .into_iter()
+                                            .map(|x| x.to_string_lossy().into_owned())
+                                            .collect::<Vec<String>>()
+                                            .join(", ")
+                                    ),
+                                ))
+                                .await;
+                            if let Some(pid_u32) = child.id() {
+                                let pid = pid_u32.try_into().context("overflow").ok();
+                                if let Some(pid) = pid {
+                                    let _ = nix::sys::signal::killpg(
+                                        Pid::from_raw(pid),
+                                        nix::sys::signal::Signal::SIGTERM,
+                                    );
+                                }
+                            }
+                            let _ = child.wait().await;
+                            if let Some(cancel) = watcher_cancel_for_handler.clone() {
+                                cancel.cancel();
+                            }
+                            let delay = {
+                                let d = process_cfg.restart_delay.unwrap_or(1);
+                                if d > 0 {
+                                    d
+                                } else {
+                                    1
+                                }
+                            };
+
+                            tokio::time::sleep(Duration::from_secs(delay)).await;
+                            let _ = sender
+                                .send(ManagerEvent::CreateProcess(process_cfg.clone()))
+                                .await;
+                            return;
+                        }
+                        Err(_) => {}
+                    }
+                }
+
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        let code = status.code().unwrap_or(0);
+                        let _ = sender
+                            .send(ManagerEvent::ProcessExited(code, process_cfg.clone()))
+                            .await;
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("Error waiting for process: {}", e);
+                        return;
+                    }
+                }
+
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
     }
 
     fn spawn_log_reader<R: AsyncRead + Unpin + Send + 'static>(
@@ -332,7 +353,9 @@ impl ProcessManager {
                             ManagerEvent::ProcessStderr(line, process.clone())
                         };
 
-                        sender.send(event).await?;
+                        if let Err(e) = sender.send(event).await {
+                            eprintln!("Failed to send log event: {}", e);
+                        }
                     }
                 }
             }

@@ -121,35 +121,35 @@ pub fn process_config(config: Config, args: &Args) -> Config {
         new_config.run.insert(key, nproc);
     }
 
-    return new_config;
+    new_config
 }
 
 fn default_align() -> bool {
-    return true;
+    true
 }
 
 fn default_behavior() -> ProcessBehavior {
-    return ProcessBehavior::Ignore;
+    ProcessBehavior::Ignore
 }
 
 fn default_error_behavior() -> ProcessBehavior {
-    return ProcessBehavior::Exit;
+    ProcessBehavior::Exit
 }
 
 fn default_name() -> String {
-    return "".to_string();
+    "".to_string()
 }
 
 fn default_restart_delay() -> u64 {
-    return 1;
+    1
 }
 
 fn default_watch() -> Vec<String> {
-    return Vec::new();
+    Vec::new()
 }
 
 fn default_hide() -> bool {
-    return false;
+    false
 }
 
 #[derive(Deserialize, Debug, Clone, Serialize)]

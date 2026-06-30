@@ -6,7 +6,7 @@
 
 # 🐾 Main Features
 
-- **Event-driven architecture** 🌙 based on `tokio` for asynchronous process running and handling.
+- **Event-driven architecture** 🌙 based on `tokio` and `notify` crates for asynchronous process running and handling.
 - **Output Tracking** 🐕 Getting stdout/stderr output from your processes.
 - **Flexible Instincts** ⚙️ Define exactly how awo behaves on process exit or error: restart the process, shut down the whole pack, or simply ignore it.
 - **Silent Mode** 🤫 Optional hiding of process output to keep your terminal clean.
@@ -15,7 +15,6 @@
 
 - [ ] Scheduling periodic processes ⏰
 - [ ] Optional Web UI 🌐
-- [ ] Use `notify` crate for filesystem watching instead of manual implementation 👁️
 - [ ] Defining signals for restart/shutdown ⚡
 - [ ] Granular output control (Hide stdout/stderr separately) 🤐
 
@@ -85,7 +84,7 @@ awo looks for an `awo.toml` file in the working directory by default. You can ge
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `align` | Boolean | true | Pads process names in the logs for better vertical alignment. |
-| `on_exit` | String | "ignore" | Action to take when a process exits with code 0. |
+| `on_exit` | String | "exit" | Action to take when a process exits with code 0. |
 | `on_error` | String | "exit" | Action to take when a process exits with a non-zero code. |
 | `restart_delay` | Integer | 1 | Seconds to wait before restarting a process. |
 | `run` | Table | N/A | A map of process definitions to execute. |
@@ -102,7 +101,7 @@ Each process is defined in the `[run.<unique_name>]` section.
 | `on_exit` | String | Global | Overrides global `on_exit` behavior. |
 | `on_error` | String | Global | Overrides global `on_error` behavior. |
 | `restart_delay` | Integer | Global | Overrides global `restart_delay` (in seconds). |
-| `watch` | Array | [] | Paths or glob patterns. Process restarts on change. |
+| `watch` | Array | [] | Paths or glob patterns. Process restarts on change. Errors (lack of permission, for example) is ignored at watcher creator. |
 | `color` | Integer | Random | ANSI color code (1-255, see [color-chart](https://upload.wikimedia.org/wikipedia/commons/1/15/Xterm_256color_chart.svg)). |
 | `hide` | Boolean | false | If true, process logs won't be printed. |
 | `cwd` | String | Current dir | Changes working directory of the process. |
