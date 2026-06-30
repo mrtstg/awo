@@ -9,3 +9,7 @@ build-static-glibc:
 
 build-static-musl:
 	cargo build --release --target x86_64-unknown-linux-musl
+
+pack-release:
+	tar -czvf awo-x86_64-unknown-linux-musl.tar.gz -C ./target/x86_64-unknown-linux-musl/release ./awo
+	tar -czvf awo-x86_64-unknown-linux-gnu.tar.gz -C ./target/x86_64-unknown-linux-gnu/release ./awo
