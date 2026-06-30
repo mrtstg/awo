@@ -22,6 +22,6 @@ pub struct Args {
     #[arg(short, long)]
     pub except: Vec<String>,
     /// Force hiding output of app
-    #[arg(short, long)]
+    #[arg(long)]
     pub hide: Vec<String>,
 }
